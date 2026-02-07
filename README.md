@@ -17,6 +17,30 @@ It is designed to support risk-aware and carbon-budgeted optimization.
 ## Demo (runnable)
 Run a full synthetic simulation with cost + CO₂ accounting:
 
+
+```text
+=== GOVERNED RUN (SLA + Carbon Budget + Audit) ===
+SLA cashout_rate <= 0.005 | Carbon budget <= 400.0 kg
+
+Forecasting:
+- Baseline MAE: 1282.11
+- P50 MAE     : 964.52
+- Overall MAE improvement: 24.8%
+- Spike-day MAE improvement: 18.4% (top 10%)
+- P90 coverage raw      : 0.746
+- P90 coverage conformal: 0.901
+- Conformal shift (q90 residual): 810.31
+
+Planned policy (selected using calibrated P90):
+- reorder_point=15000 | cashout=0.0000 | trips=20 | cost=3232.00 | co2=255.00
+
+Realized backtest on actual demand:
+- cashout_rate=0.0000 | total_cashouts=0 | cost=2774.78 | co2=216.75
+
+=== DECISION STATUS ===
+STATUS: ✅ PASSED (SLA met, Carbon under budget)
+
+
 ```bash
 python -m src.run_sim
 
@@ -54,3 +78,8 @@ and unnecessary CO₂ emissions in practice.
 
 Reducing forecast error specifically on spike days improves
 downstream operational decisions under SLA and carbon constraints.
+
+## Governed run (calibrated uncertainty + carbon budget + audit)
+
+```bash
+python -m src.run_governed
