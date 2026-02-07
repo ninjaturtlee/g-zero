@@ -1,4 +1,3 @@
-```markdown
 <div align="center">
 
 # G-Zero
@@ -18,9 +17,9 @@ optimizing cash inventory under mathematically guaranteed uncertainty bounds.*
 
 ---
 
-## ⚡ Key Results: The Governed Run
+## Key Results: The Governed Run
 
-**g-zero** does not just predict demand; it produces **audit-grade artifacts**. Below is the output of a realized backtest on production-like topology, proving the system met both the SLA and the Carbon Budget.
+**G-Zero** does not just predict demand. It produces **audit-grade artifacts**. Below is the output of a realized backtest on production-like topology, proving the system met both the SLA and the Carbon Budget.
 
 ```text
 === GOVERNED RUN (SLA + Carbon Budget + Audit) ===
