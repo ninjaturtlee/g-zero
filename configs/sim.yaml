@@ -1,5 +1,6 @@
 seed: 42
-horizon_days: 120
+horizon_days: 365
+carbon_budget_kg: 400.0
 
 atm:
   initial_cash: 25000

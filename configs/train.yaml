@@ -1,0 +1,13 @@
+seed: 42
+test_ratio: 0.2
+
+lags: [1, 7, 14]
+roll_window: 14
+
+xgboost:
+  n_estimators: 800
+  max_depth: 6
+  learning_rate: 0.03
+  subsample: 0.9
+  colsample_bytree: 0.9
+  reg_lambda: 1.0

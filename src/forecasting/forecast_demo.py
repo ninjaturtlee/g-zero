@@ -12,23 +12,30 @@ from src.forecasting.xgboost_model import (
     train_val_split_time,
 )
 
+from src.forecasting.bank_real_generator import BankRealGeneratorConfig, generate_bank_real_series
 
-def generate_synthetic_series(days: int, seed: int = 42) -> pd.Series:
-    rng = np.random.default_rng(seed)
-    idx = pd.date_range("2024-01-01", periods=days, freq="D")
 
-    t = np.arange(days)
-    base = 8000.0
-    weekly = 2000.0 * np.sin(2 * np.pi * t / 7)
-    noise = rng.normal(0, 800.0, size=days)
-    y = base + weekly + noise
+def underforecast_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Penalize only under-forecasting (stockout-risk proxy)."""
+    under = np.maximum(y_true - y_pred, 0.0)
+    return float(np.mean(under))
 
-    # occasional demand spikes (e.g., holidays)
-    spike_days = rng.choice(days, size=max(1, days // 30), replace=False)
-    y[spike_days] += rng.uniform(5000, 12000, size=len(spike_days))
 
-    y = np.clip(y, 0, None)
-    return pd.Series(y, index=idx, name="demand")
+def moving_average_forecast(y: np.ndarray, window: int = 7) -> np.ndarray:
+    """
+    Simple causal baseline: predicts next value as mean of last `window` values.
+    Pads first `window` with the first available average.
+    """
+    y = np.asarray(y, dtype=float)
+    preds = np.zeros_like(y)
+    for i in range(len(y)):
+        start = max(0, i - window)
+        hist = y[start:i]
+        if len(hist) == 0:
+            preds[i] = y[0]
+        else:
+            preds[i] = float(np.mean(hist))
+    return preds
 
 
 def main() -> None:
@@ -38,12 +45,14 @@ def main() -> None:
     days = int(sim_cfg["horizon_days"])
     seed = int(sim_cfg["seed"])
 
-    series = generate_synthetic_series(days, seed=seed)
+    # --- Bank-real synthetic demand ---
+    series = generate_bank_real_series(BankRealGeneratorConfig(days=days, seed=seed))
 
-    # Baseline: seasonal naive (weekly)
-    baseline_pred_full = seasonal_naive_forecast(series.values, season=7)
+    # --- Baselines ---
+    seasonal_pred_full = seasonal_naive_forecast(series.values, season=7)
+    ma7_pred_full = moving_average_forecast(series.values, window=7)
 
-    # XGBoost features
+    # --- Features for ML model ---
     base_feats = make_time_features(series)
     feats = add_lags(
         base_feats,
@@ -56,57 +65,109 @@ def main() -> None:
     df = feats.copy()
     df["y"] = series.values
     df = df.dropna()
+
+    # Leakage sanity: index must be strictly increasing
+    assert df.index.is_monotonic_increasing, "Time index is not sorted (leakage risk)."
+
     y = df["y"].values
     X = df.drop(columns=["y"])
 
-    X_tr, y_tr, X_va, y_va = train_val_split_time(
-        X, y, val_ratio=float(train_cfg["test_ratio"])
-    )
+    # Time split (no leakage)
+    X_tr, y_tr, X_va, y_va = train_val_split_time(X, y, val_ratio=float(train_cfg["test_ratio"]))
 
+    # Train model (point forecast)
     model = XGBForecastModel.build(train_cfg["xgboost"], seed=seed)
     model.fit(X_tr, y_tr)
     xgb_pred = model.predict(X_va)
 
-    # Baseline on same validation window (align length)
-    baseline_df = pd.Series(baseline_pred_full, index=series.index).loc[df.index]
+    # Align baselines to same validation window
+    seasonal_df = pd.Series(seasonal_pred_full, index=series.index).loc[df.index]
+    ma7_df = pd.Series(ma7_pred_full, index=series.index).loc[df.index]
     cut = int(len(df) * (1 - float(train_cfg["test_ratio"])))
-    baseline_va = baseline_df.iloc[cut:].values
+    seasonal_va = seasonal_df.iloc[cut:].values
+    ma7_va = ma7_df.iloc[cut:].values
 
-    # --- Overall metrics ---
-    base_mae = mae(y_va, baseline_va)
-    base_rmse = rmse(y_va, baseline_va)
-    xgb_mae = mae(y_va, xgb_pred)
-    xgb_rmse = rmse(y_va, xgb_pred)
+    # Sanity: lengths match
+    assert len(y_va) == len(seasonal_va) == len(ma7_va) == len(xgb_pred), "Length mismatch."
 
-    improvement = (base_mae - xgb_mae) / base_mae * 100
+    # --- Core metrics ---
+    def report_block(name: str, yhat: np.ndarray) -> dict:
+        return {
+            "mae": mae(y_va, yhat),
+            "rmse": rmse(y_va, yhat),
+            "under_mae": underforecast_mae(y_va, yhat),
+        }
 
-    print("\n=== Forecasting Demo (Synthetic) ===")
-    print(f"Train rows: {len(X_tr)} | Val rows: {len(X_va)}")
+    seasonal_m = report_block("seasonal", seasonal_va)
+    ma7_m = report_block("ma7", ma7_va)
+    xgb_m = report_block("xgb", xgb_pred)
 
-    print("\nBaseline (seasonal naive, weekly):")
-    print(f"  MAE : {base_mae:.2f}")
-    print(f"  RMSE: {base_rmse:.2f}")
+    # Improvements vs seasonal naive
+    impr_mae = (seasonal_m["mae"] - xgb_m["mae"]) / seasonal_m["mae"] * 100
+    impr_under = (seasonal_m["under_mae"] - xgb_m["under_mae"]) / seasonal_m["under_mae"] * 100 if seasonal_m["under_mae"] > 0 else 0.0
 
-    print("\nXGBoost:")
-    print(f"  MAE : {xgb_mae:.2f}")
-    print(f"  RMSE: {xgb_rmse:.2f}")
-
-    print(f"\nMAE improvement vs baseline: {improvement:.1f}%")
-
-    # --- Tail-risk evaluation (top 10% demand days in validation) ---
-    tail_pct = 90
-    threshold = np.percentile(y_va, tail_pct)
+    # --- Tail-risk evaluation ---
+    tail_pct = 80
+    threshold = float(np.percentile(y_va, tail_pct))
     mask = y_va >= threshold
+    n_tail = int(mask.sum())
 
-    base_tail_mae = mae(y_va[mask], baseline_va[mask])
-    xgb_tail_mae = mae(y_va[mask], xgb_pred[mask])
-    tail_improvement = (base_tail_mae - xgb_tail_mae) / base_tail_mae * 100
+    def tail_report(yhat: np.ndarray) -> tuple[float, float]:
+        return mae(y_va[mask], yhat[mask]), underforecast_mae(y_va[mask], yhat[mask])
 
-    print(f"\nTail-risk evaluation (top {100 - tail_pct}% demand days in validation):")
-    print(f"  Threshold (>= p{tail_pct}): {threshold:.2f}")
-    print(f"  Baseline MAE: {base_tail_mae:.2f}")
-    print(f"  XGBoost MAE : {xgb_tail_mae:.2f}")
-    print(f"  Improvement on spike days: {tail_improvement:.1f}%\n")
+    seasonal_tail_mae, seasonal_tail_under = tail_report(seasonal_va)
+    ma7_tail_mae, ma7_tail_under = tail_report(ma7_va)
+    xgb_tail_mae, xgb_tail_under = tail_report(xgb_pred)
+
+    tail_impr = (seasonal_tail_mae - xgb_tail_mae) / seasonal_tail_mae * 100 if seasonal_tail_mae > 0 else 0.0
+    tail_under_impr = (seasonal_tail_under - xgb_tail_under) / seasonal_tail_under * 100 if seasonal_tail_under > 0 else 0.0
+
+    # --- Worst misses (under-forecast days) ---
+    # under_err = actual - pred (positive = under-forecast)
+    under_err_seasonal = y_va - seasonal_va
+    under_err_xgb = y_va - xgb_pred
+
+    worst_seasonal = np.argsort(-under_err_seasonal)[:5]  # biggest under-forecast
+    worst_xgb = np.argsort(-under_err_xgb)[:5]
+
+    print("\n=== Forecasting Demo (Bank-Real Synthetic) ===")
+    print(f"Train rows: {len(X_tr)} | Val rows: {len(X_va)}")
+    print(f"Tail set: top {100 - tail_pct}% (n={n_tail} days) | threshold >= p{tail_pct}: {threshold:.2f}")
+
+    print("\nBaselines + Model:")
+    print("Seasonal naive (weekly):")
+    print(f"  MAE : {seasonal_m['mae']:.2f} | RMSE: {seasonal_m['rmse']:.2f} | Under-MAE: {seasonal_m['under_mae']:.2f}")
+    print("Moving average (7d):")
+    print(f"  MAE : {ma7_m['mae']:.2f} | RMSE: {ma7_m['rmse']:.2f} | Under-MAE: {ma7_m['under_mae']:.2f}")
+    print("XGBoost:")
+    print(f"  MAE : {xgb_m['mae']:.2f} | RMSE: {xgb_m['rmse']:.2f} | Under-MAE: {xgb_m['under_mae']:.2f}")
+
+    print(f"\nImprovement vs seasonal naive:")
+    print(f"  MAE improvement: {impr_mae:.1f}%")
+    print(f"  Under-forecast reduction: {impr_under:.1f}%")
+
+    print(f"\nTail-risk (top {100 - tail_pct}% demand days):")
+    print(f"  Seasonal naive tail MAE: {seasonal_tail_mae:.2f} | tail under-MAE: {seasonal_tail_under:.2f}")
+    print(f"  MA(7)         tail MAE: {ma7_tail_mae:.2f} | tail under-MAE: {ma7_tail_under:.2f}")
+    print(f"  XGBoost       tail MAE: {xgb_tail_mae:.2f} | tail under-MAE: {xgb_tail_under:.2f}")
+    print(f"  Tail MAE improvement vs seasonal: {tail_impr:.1f}%")
+    print(f"  Tail under-forecast reduction vs seasonal: {tail_under_impr:.1f}%")
+
+    print("\nWorst 5 UNDER-forecast days (Seasonal naive):")
+    for i in worst_seasonal:
+        print(
+            f"  i={i:03d} | actual={y_va[i]:.2f} | seasonal={seasonal_va[i]:.2f} | xgb={xgb_pred[i]:.2f} | "
+            f"(actual-seasonal)={under_err_seasonal[i]:.2f}"
+        )
+
+    print("\nWorst 5 UNDER-forecast days (XGBoost):")
+    for i in worst_xgb:
+        print(
+            f"  i={i:03d} | actual={y_va[i]:.2f} | seasonal={seasonal_va[i]:.2f} | xgb={xgb_pred[i]:.2f} | "
+            f"(actual-xgb)={under_err_xgb[i]:.2f}"
+        )
+
+    print("")
 
 
 if __name__ == "__main__":

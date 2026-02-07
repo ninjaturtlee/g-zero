@@ -13,3 +13,6 @@ data/processed/*
 !data/processed/.gitkeep
 
 .DS_Store
+
+# Generated artifacts / outputs
+artifacts/
