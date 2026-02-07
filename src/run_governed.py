@@ -22,6 +22,7 @@ def generate_synthetic_series(days: int, seed: int = 42) -> pd.Series:
     noise = rng.normal(0, 800.0, size=days)
     y = base + weekly + noise
 
+    # occasional demand spikes (e.g., holidays)
     spike_days = rng.choice(days, size=max(1, days // 30), replace=False)
     y[spike_days] += rng.uniform(5000, 12000, size=len(spike_days))
 
@@ -76,8 +77,8 @@ def main() -> None:
     seed = int(sim_cfg["seed"])
 
     # Governance constraints
-    sla_max = float(sim_cfg["sla"]["cashout_prob_max"])  # e.g., 0.005
-    carbon_budget = float(sim_cfg.get("carbon_budget_kg", 400.0))  # allow override via sim.yaml
+    sla_max = float(sim_cfg["sla"]["cashout_prob_max"])  # e.g. 0.005
+    carbon_budget = float(sim_cfg.get("carbon_budget_kg", 400.0))
 
     # Data
     series = generate_synthetic_series(days, seed=seed)
@@ -99,7 +100,7 @@ def main() -> None:
 
     X_tr, y_tr, X_va, y_va = train_val_split_time(X, y, val_ratio=float(train_cfg["test_ratio"]))
 
-    # Baseline forecast on the same aligned index
+    # Baseline forecast (aligned to df index and val slice)
     baseline_pred_full = seasonal_naive_forecast(series.values, season=7)
     baseline_df = pd.Series(baseline_pred_full, index=series.index).loc[df.index]
     cut = int(len(df) * (1 - float(train_cfg["test_ratio"])))
@@ -121,7 +122,7 @@ def main() -> None:
     conformal_shift_q90 = float(np.quantile(residuals, 0.90))
     p90_corr = p90 + conformal_shift_q90
 
-    # Planning: choose policy using calibrated conservative plan (P90 corrected)
+    # Policy selection uses calibrated P90 plan
     reorder_points = [5000, 10000, 15000, 20000, 25000, 30000]
     plan_selection = choose_policy_under_constraints(
         demand_plan=p90_corr,
@@ -131,7 +132,7 @@ def main() -> None:
         sla_max=sla_max,
     )
 
-    # Backtest the chosen policy on REALIZED demand (y_va)
+    # Backtest chosen policy on realized demand (y_va)
     backtest = None
     if plan_selection["status"] == "ok":
         rp = plan_selection["best"]["reorder_point"]
@@ -149,14 +150,19 @@ def main() -> None:
         backtest = realized_res.summary()
         backtest["reorder_point"] = rp
 
-    # Metrics: overall + spike days (validation)
+    # Forecasting metrics
     base_mae = mae(y_va, baseline_va)
     p50_mae = mae(y_va, p50)
+    overall_impr = float((base_mae - p50_mae) / base_mae * 100)
 
-    thr = np.percentile(y_va, 90)
+    thr = float(np.percentile(y_va, 90))
     mask = y_va >= thr
     base_tail_mae = mae(y_va[mask], baseline_va[mask])
     p50_tail_mae = mae(y_va[mask], p50[mask])
+    tail_impr = float((base_tail_mae - p50_tail_mae) / base_tail_mae * 100)
+
+    cov_raw = float(np.mean(y_va <= p90))
+    cov_conf = float(np.mean(y_va <= p90_corr))
 
     out = {
         "governance": {
@@ -167,40 +173,43 @@ def main() -> None:
             "val_rows": int(len(y_va)),
             "baseline_weekly_mae": float(base_mae),
             "p50_mae": float(p50_mae),
-            "overall_mae_improvement_pct": float((base_mae - p50_mae) / base_mae * 100),
-            "tail_threshold_p90": float(thr),
+            "overall_mae_improvement_pct": overall_impr,
+            "tail_threshold_p90": thr,
             "baseline_tail_mae": float(base_tail_mae),
             "p50_tail_mae": float(p50_tail_mae),
-            "tail_mae_improvement_pct": float((base_tail_mae - p50_tail_mae) / base_tail_mae * 100),
-            "quantile_coverage_p90_raw": float(np.mean(y_va <= p90)),
-            "quantile_coverage_p90_conformal": float(np.mean(y_va <= p90_corr)),
+            "tail_mae_improvement_pct": tail_impr,
+            "quantile_coverage_p90_raw": cov_raw,
+            "quantile_coverage_p90_conformal": cov_conf,
             "conformal_shift_q90": float(conformal_shift_q90),
         },
         "policy_selection_plan_using_p90_conformal": plan_selection,
         "realized_backtest_on_actual_demand": backtest,
         "notes": [
-            "Policy is selected using calibrated P90 demand plan under SLA + carbon budget.",
+            "Policy selection uses calibrated P90 demand plan under SLA + carbon budget constraints.",
             "Conformal correction shifts P90 upward to improve coverage reliability.",
-            "Backtest evaluates the chosen policy on realized demand.",
-            "Audit bundle contains config, model kind, constraints, and results.",
+            "Backtest evaluates the same selected policy on realized demand.",
+            "Audit bundle contains constraints, results, and metadata for traceability.",
         ],
     }
 
-    # Print a clean summary
+    # Console summary
     print("\n=== GOVERNED RUN (SLA + Carbon Budget + Audit) ===")
     print(f"SLA cashout_rate <= {sla_max} | Carbon budget <= {carbon_budget} kg")
 
     print("\nForecasting:")
-    print(f"- Baseline MAE: {out['forecasting']['baseline_weekly_mae']:.2f}")
-    print(f"- P50 MAE     : {out['forecasting']['p50_mae']:.2f}")
-    print(f"- Overall MAE improvement: {out['forecasting']['overall_mae_improvement_pct']:.1f}%")
-    print(f"- Spike-day MAE improvement: {out['forecasting']['tail_mae_improvement_pct']:.1f}% (top 10%)")
-    print(f"- P90 coverage raw      : {out['forecasting']['quantile_coverage_p90_raw']:.3f}")
-    print(f"- P90 coverage conformal: {out['forecasting']['quantile_coverage_p90_conformal']:.3f}")
-    print(f"- Conformal shift (q90 residual): {out['forecasting']['conformal_shift_q90']:.2f}")
+    print(f"- Baseline MAE: {base_mae:.2f}")
+    print(f"- P50 MAE     : {p50_mae:.2f}")
+    print(f"- Overall MAE improvement: {overall_impr:.1f}%")
+    print(f"- Spike-day MAE improvement: {tail_impr:.1f}% (top 10%)")
+    print(f"- P90 coverage raw      : {cov_raw:.3f}")
+    print(f"- P90 coverage conformal: {cov_conf:.3f}")
+    print(f"- Conformal shift (q90 residual): {conformal_shift_q90:.2f}")
 
+    status_ok = False
     if plan_selection["status"] == "ok":
         b = plan_selection["best"]
+        status_ok = (b["cashout_rate"] <= sla_max) and (b["total_co2"] <= carbon_budget)
+
         print("\nPlanned policy (selected using calibrated P90):")
         print(
             f"- reorder_point={b['reorder_point']} | cashout={b['cashout_rate']:.4f} | "
@@ -217,6 +226,13 @@ def main() -> None:
         )
 
     audit_path = write_audit_bundle(out)
+
+    print("\n=== DECISION STATUS ===")
+    if status_ok:
+        print("STATUS: ✅ PASSED (SLA met, Carbon under budget)")
+    else:
+        print("STATUS: ❌ FAILED (Constraint violation detected)")
+
     print(f"\nAudit written: {audit_path}\n")
 
 
