@@ -19,3 +19,9 @@ Run a full synthetic simulation with cost + CO₂ accounting:
 
 ```bash
 python -m src.run_sim
+
+## Constraint-based selection (optimization-ready)
+Select the lowest-cost policy subject to SLA and a carbon budget:
+
+```bash
+python -m src.choose_policy
