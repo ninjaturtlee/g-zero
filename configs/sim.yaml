@@ -1,0 +1,22 @@
+seed: 42
+horizon_days: 120
+
+atm:
+  initial_cash: 25000
+  max_capacity: 50000
+
+policy:
+  type: reorder_point
+  reorder_point: 15000
+  target_level: 45000
+
+costs:
+  restock_fixed_cost: 150.0
+  holding_cost_rate_daily: 0.0001
+
+carbon:
+  co2_per_truck_km: 0.85
+  avg_trip_distance_km: 15.0
+
+sla:
+  cashout_prob_max: 0.005
