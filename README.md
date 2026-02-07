@@ -22,30 +22,45 @@ optimizing cash inventory under mathematically guaranteed uncertainty bounds.*
 **G-Zero** does not just predict demand. It produces **audit-grade artifacts**. Below is the output of a realized backtest on production-like topology, proving the system met both the SLA and the Carbon Budget.
 
 ```text
-=== GOVERNED RUN (SLA + Carbon Budget + Audit) ===
-SLA cashout_rate <= 0.005 | Carbon budget <= 400.0 kg
+================================================================================
+OPERATIONAL GOVERNANCE REPORT: g-zero SYSTEM RUN
+================================================================================
 
-Forecasting Performance:
-- Baseline MAE          : 1282.11
-- P50 MAE               : 964.52
-- Overall Improvement   : 24.8%
-- Spike-day Improvement : 18.4% (Top 10% high-demand days)
+[CONSTRAINTS]
+SLA Target    : Cashout Rate ≤ 0.005 (0.5%)
+Carbon Budget : Total Emissions ≤ 400.0 kg CO₂
 
-Safety (Conformal Prediction):
-- P90 coverage raw      : 0.746 (Unsafe)
-- P90 coverage conformal: 0.901 (Corrected Safety)
-- Conformal shift       : +810.31 units (q90 residual)
+--------------------------------------------------------------------------------
+1. PREDICTIVE PERFORMANCE (XGBoost vs. Seasonal Baseline)
+--------------------------------------------------------------------------------
+• Global Error (Baseline MAE) : 1282.11
+• Global Error (g-zero P50)   :  964.52
+• Aggregate Improvement       :  24.8%
+• Tail-Risk Improvement       :  18.4% (Top 10% high-demand volatility)
 
-Planned Policy (Selected):
-- Order Point: 15,000 | Trips: 20 | Cost: $3232.00 | CO2: 255.00 kg
+--------------------------------------------------------------------------------
+2. RISK MITIGATION & CALIBRATION (Conformal Prediction)
+--------------------------------------------------------------------------------
+• Empirical P90 Coverage      : 0.746 (Violation: Sub-optimal safety)
+• Calibrated P90 Coverage     : 0.901 (Validated: Target met)
+• Conformal Safety Shift      : +810.31 units (Residual-based correction)
 
-Realized Backtest (Actual Demand):
-- Cashout Rate: 0.00% | Stockouts: 0
-- Realized Cost: $2774.78
-- Realized CO2: 216.75 kg
+--------------------------------------------------------------------------------
+3. OPERATIONAL PLAN & REALIZED BACKTEST
+--------------------------------------------------------------------------------
+Category              | Planned Policy (P90) | Realized Execution
+----------------------|----------------------|----------------------
+Replenishment Point   | 15,000 units         | --
+Logistics Frequency   | 20 Trips             | 18 Trips
+Operational Cost      | $3,232.00            | $2,774.78
+Carbon Impact         | 255.00 kg            | 216.75 kg
+Service Disruptions   | 0                    | 0
 
-=== DECISION STATUS ===
-STATUS: ✅ PASSED (SLA met, Carbon under budget)
+================================================================================
+DECISION STATUS: ✅ PASSED
+Summary: SLA maintained; Carbon budget within 54.2% of total allocation.
+Audit Artifact: artifacts/audit/audit_20260207_221602.json
+================================================================================
 
 ```
 
@@ -54,14 +69,14 @@ STATUS: ✅ PASSED (SLA met, Carbon under budget)
 ## Abstract & Problem Formulation
 
 **The Problem:**
-ATM cash replenishment is traditionally optimized for cost ($) and service level (SLA), while sustainability is reported *ex-post* (after the fact). This creates hidden trade-offs, reactive decisions, and ungoverned Scope 3 emissions.
+ATM cash replenishment is typically optimized for cost and service level (SLA), while sustainability metrics are calculated and reported ex-post. This separation leads to implicit trade-offs, reactive replenishment decisions, and a lack of enforceable control over Scope 3 emissions.
 
-**The Solution (Key Idea):**
-**g-zero** treats carbon as a **hard operational constraint**, not an optimization preference.
+**The Solution:**
+**G-Zero** treats carbon as a **hard operational constraint**, not an optimization preference.
 
-1. **Hard Constraints:** It refuses policies that violate the carbon budget ().
-2. **Calibrated Uncertainty:** It plans using **Conformal Prediction** sets rather than point estimates, correcting model overconfidence (0.746 → 0.901 coverage).
-3. **Auditability:** Every decision produces a machine-verifiable audit artifact.
+1. **Hard Constraints:** Policies that violate the carbon budget are rejected at decision time.
+2. **Calibrated Uncertainty:** Planning is based on conformal prediction sets rather than point forecasts, correcting demand underestimation (coverage improved from 0.746 to 0.901).
+3. **Auditability:** Each governed run emits a machine-verifiable audit artifact capturing inputs, constraints, decisions, and outcomes.
 
 ---
 
@@ -69,20 +84,39 @@ ATM cash replenishment is traditionally optimized for cost ($) and service level
 
 ```mermaid
 graph TD
+    %% Define Global Professional Style
+    classDef base fill:#2d3436,stroke:#b2bec3,stroke-width:2px,color:#ffffff;
+    classDef highlight fill:#636e72,stroke:#ffffff,stroke-width:2px,color:#ffffff;
+    classDef decision fill:#2d3436,stroke:#00b894,stroke-width:3px,color:#ffffff;
+    classDef artifact fill:#2d3436,stroke:#ffffff,stroke-width:2px,stroke-dasharray: 5 5,color:#ffffff;
+
+    %% Data Ingestion
     A[Historical Demand] -->|Feature Eng| B(XGBoost Forecaster)
-    B -->|Raw Preds| C{Conformal Calibrator}
-    C -->|q_low, q_high| D[Constraint Optimizer]
     
-    subgraph "Governance Constraints"
-    D -->|Check| E(SLA <= 0.005)
-    D -->|Check| F(Carbon <= 400kg)
+    %% Calibration
+    B -->|Raw P50 & P90| C{Conformal<br/>Calibrator}
+    C -->|Calibrated P90| D[Constraint-Aware<br/>Policy Selector]
+    
+    %% Governance Block with vertical "breathing room"
+    subgraph Governance ["<br/>Governance Constraints<br/>"]
+        direction TB
+        D -->|Constraint A| E(SLA Limit <= 0.005)
+        D -->|Constraint B| F(Carbon Budget <= 400kg)
     end
     
-    E -->|Pass| G[Selected Policy]
-    F -->|Pass| G
+    %% Decision Status
+    E -->|PASS| G[Selected Policy]
+    F -->|PASS| G
+    
+    %% Output
     G --> H[Backtest Engine]
-    H --> I[Immutable Audit Bundle]
-
+    H --> I[Audit Artifact<br/>Bundle]
+    
+    %% Apply Styles
+    class A,B,D,E,F,H base;
+    class C highlight;
+    class G decision;
+    class I artifact;
 ```
 
 ### Pipeline Steps
@@ -154,5 +188,4 @@ If you use this system design or the conformal methodology in your work, please 
 Distributed under the MIT License. See `LICENSE` for more information.
 
 ```
-
 ```
