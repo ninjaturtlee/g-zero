@@ -23,7 +23,7 @@ optimizing cash inventory under mathematically guaranteed uncertainty bounds.*
 
 ```text
 ================================================================================
-OPERATIONAL GOVERNANCE REPORT: g-zero SYSTEM RUN
+OPERATIONAL GOVERNANCE REPORT: G-Zero SYSTEM RUN
 ================================================================================
 
 [CONSTRAINTS]
