@@ -1,23 +1,3 @@
-# g-zero
-
-Risk-aware, carbon-budgeted operations planning for ATM cash replenishment
-(forecasting + simulation + optimization-ready).
-
-## What this is
-A compact, testable core that treats sustainability as an operational constraint,
-not a marketing metric.
-
-The project simulates ATM cash inventory under uncertain demand while tracking:
-- service failures (cash-outs)
-- operational cost
-- CO₂ emissions from replenishment trips
-
-It is designed to support risk-aware and carbon-budgeted optimization.
-
-## Demo (runnable)
-Run a full synthetic simulation with cost + CO₂ accounting:
-
-
 ```text
 === GOVERNED RUN (SLA + Carbon Budget + Audit) ===
 SLA cashout_rate <= 0.005 | Carbon budget <= 400.0 kg
@@ -40,46 +20,42 @@ Realized backtest on actual demand:
 === DECISION STATUS ===
 STATUS: ✅ PASSED (SLA met, Carbon under budget)
 
+# g-zero
 
-```bash
-python -m src.run_sim
+Carbon-budgeted, SLA-guaranteed ATM operations with calibrated uncertainty
+and audit-grade decision logs.
 
-## Constraint-based selection (optimization-ready)
-Select the lowest-cost policy subject to SLA and a carbon budget:
+## Problem
+ATM cash replenishment is traditionally optimized for cost and service level,
+while sustainability is reported after the fact.
+This creates hidden trade-offs, reactive decisions, and ungoverned emissions.
 
-```bash
-python -m src.choose_policy
+## Key idea (what’s new)
+Treat carbon as a **hard operational constraint**, not an optimization preference,
+and plan under **calibrated demand uncertainty**.
+Every decision produces a machine-verifiable audit artifact.
 
-## Forecasting results (evidence)
+## How it works (pipeline)
+1) Forecast demand with uncertainty (P50 / calibrated P90)
+2) Select replenishment policy under:
+   - SLA constraint
+   - Carbon budget
+3) Backtest on realized demand
+4) Emit audit bundle (inputs, models, constraints, outcome)
 
-We benchmark a classical seasonal baseline against a machine-learning model
-to ensure that improvements are real and not cosmetic.
+## Evidence
+- Forecasting: +24.8% MAE improvement vs seasonal naive
+- Tail risk: +18.4% MAE improvement on top-10% demand days
+- Governance: SLA met with 255kg CO₂ (under 400kg budget)
+- Calibration: P90 coverage corrected from 0.746 → 0.901
 
-**Setup**
-- Baseline: seasonal naive (weekly)
-- ML model: XGBoost with lagged features, calendar features, and trend
-- Evaluation: hold-out time split (no leakage)
-- Data: synthetic daily demand with seasonality and demand spikes
+## Why this matters
+This enables banks to:
+- enforce carbon budgets at decision time
+- guarantee service levels under uncertainty
+- produce audit-ready justification for every operational choice
 
-**Results (365-day synthetic pilot)**
-
-- Overall MAE improvement: **14.1%**
-- Overall RMSE reduction: significant
-- Tail-risk performance (top 10% demand days):
-  - Baseline MAE: 2819.98
-  - XGBoost MAE: 2306.79
-  - **Improvement on spike days: 18.2%**
-
-**Interpretation**
-Seasonal naive performs strongly on average days, but the ML model
-significantly reduces error during high-demand spikes.
-These tail events drive cash-outs, emergency replenishments,
-and unnecessary CO₂ emissions in practice.
-
-Reducing forecast error specifically on spike days improves
-downstream operational decisions under SLA and carbon constraints.
-
-## Governed run (calibrated uncertainty + carbon budget + audit)
-
+## Run
 ```bash
 python -m src.run_governed
+
