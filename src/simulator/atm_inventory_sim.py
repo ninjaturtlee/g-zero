@@ -1,31 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Any
 import numpy as np
-from src.simulator.policies import ReorderPointPolicy
 
 
 @dataclass
 class SimulationResult:
     cash_levels: np.ndarray
-    cashouts: np.ndarray
     replenishments: np.ndarray
     served_demand: np.ndarray
     unmet_demand: np.ndarray
+    cashouts: np.ndarray
     op_cost: np.ndarray
     co2_kg: np.ndarray
 
-    def summary(self) -> Dict[str, Any]:
+    @property
+    def summary(self) -> dict:
+        demand_total = float(np.sum(self.served_demand + self.unmet_demand))
+        unmet_total = float(np.sum(self.unmet_demand))
+        cashout_rate = float(np.mean(self.cashouts > 0))
+
         return {
             "days": int(len(self.cash_levels)),
-            "cashout_rate": float(np.mean(self.cashouts)),
-            "total_cashouts": int(np.sum(self.cashouts)),
-            "avg_cash_level": float(np.mean(self.cash_levels)),
-            "total_replenished": float(np.sum(self.replenishments)),
-            "total_unmet_demand": float(np.sum(self.unmet_demand)),
+            "cashout_rate": cashout_rate,
+            "total_unmet_demand": unmet_total,
+            "total_demand": demand_total,
             "total_operational_cost": float(np.sum(self.op_cost)),
             "total_co2_kg": float(np.sum(self.co2_kg)),
+            "repl_trips": int(np.sum(self.replenishments > 0)),
         }
 
 
@@ -34,60 +36,73 @@ def simulate_atm_inventory_ops(
     *,
     initial_cash: float,
     max_capacity: float,
-    policy: ReorderPointPolicy,
+    policy,
     restock_fixed_cost: float,
     holding_cost_rate_daily: float,
     co2_per_truck_km: float,
     avg_trip_distance_km: float,
+    batch_size: int = 1,
 ) -> SimulationResult:
-    demand = np.asarray(demand, dtype=float)
-    n = demand.shape[0]
+    """
+    Simulate ATM cash inventory day-by-day.
 
-    cash_levels = np.zeros(n)
-    cashouts = np.zeros(n, dtype=int)
-    replenishments = np.zeros(n)
-    served_demand = np.zeros(n)
-    unmet_demand = np.zeros(n)
-    op_cost = np.zeros(n)
-    co2_kg = np.zeros(n)
+    Key: CO2 is trip-based, but we allow route batching:
+    effective_co2_per_restock = co2_per_trip / batch_size
+    where batch_size approximates how many ATMs are served per route.
+    """
+
+    demand = np.asarray(demand, dtype=float)
+    n = int(len(demand))
 
     cash = float(initial_cash)
-    if cash > max_capacity:
-        cash = max_capacity
+    max_capacity = float(max_capacity)
 
-    co2_per_trip = co2_per_truck_km * avg_trip_distance_km
+    cash_levels = np.zeros(n, dtype=float)
+    replenishments = np.zeros(n, dtype=float)
+    served = np.zeros(n, dtype=float)
+    unmet = np.zeros(n, dtype=float)
+    cashouts = np.zeros(n, dtype=int)
+    op_cost = np.zeros(n, dtype=float)
+    co2 = np.zeros(n, dtype=float)
+
+    co2_per_trip = float(co2_per_truck_km) * float(avg_trip_distance_km)
+    batch_size = max(1, int(batch_size))
+    effective_co2_per_restock = co2_per_trip / batch_size
 
     for t in range(n):
-        d = demand[t]
-        served = min(cash, d)
-        served_demand[t] = served
-        cash -= served
+        # 1) Replenish decision
+        add = float(policy.decide_replenish_amount(cash, max_capacity))
+        add = max(0.0, min(add, max_capacity - cash))
 
-        if d > served:
-            cashouts[t] = 1
-            unmet_demand[t] = d - served
-            cash = 0.0
-
-        add = policy.decide_replenish_amount(cash, max_capacity)
-        if add > 0:
-            cash = min(max_capacity, cash + add)
+        if add > 0.0:
+            cash += add
             replenishments[t] = add
-            op_cost[t] += restock_fixed_cost
-            co2_kg[t] += co2_per_trip
+            op_cost[t] += float(restock_fixed_cost)
+            co2[t] += effective_co2_per_restock
 
-        op_cost[t] += cash * holding_cost_rate_daily
+        # 2) Serve demand
+        d = float(demand[t])
+        if cash >= d:
+            cash -= d
+            served[t] = d
+        else:
+            served[t] = cash
+            unmet[t] = d - cash
+            cash = 0.0
+            cashouts[t] = 1
 
-        if cash < -1e-9:
-            raise AssertionError("Cash went negative")
+        # 3) Holding cost
+        op_cost[t] += cash * float(holding_cost_rate_daily)
 
+        # 4) Log
         cash_levels[t] = cash
 
     return SimulationResult(
         cash_levels=cash_levels,
-        cashouts=cashouts,
         replenishments=replenishments,
-        served_demand=served_demand,
-        unmet_demand=unmet_demand,
+        served_demand=served,
+        unmet_demand=unmet,
+        cashouts=cashouts,
         op_cost=op_cost,
-        co2_kg=co2_kg,
+        co2_kg=co2,
     )

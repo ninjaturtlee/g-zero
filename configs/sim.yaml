@@ -5,6 +5,16 @@ carbon_budget_kg: 400.0
 atm:
   initial_cash: 25000
   max_capacity: 50000
+  restock_fixed_cost: 150.0
+  holding_cost_rate_daily: 0.0001
+
+carbon:
+  co2_per_truck_km: 0.85
+  avg_trip_distance_km: 15.0
+  batch_size: 2
+
+sla_cashout_rate_max: 0.005
+carbon_budget_kg: 150.0
 
 policy:
   type: reorder_point
@@ -15,9 +25,6 @@ costs:
   restock_fixed_cost: 150.0
   holding_cost_rate_daily: 0.0001
 
-carbon:
-  co2_per_truck_km: 0.85
-  avg_trip_distance_km: 15.0
 
 sla:
   cashout_prob_max: 0.005
