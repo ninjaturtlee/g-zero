@@ -31,8 +31,8 @@ class SimulationResult:
 
 
 def simulate_atm_inventory_ops(
-    demand: np.ndarray,
     *,
+    demand: np.ndarray,
     initial_cash: float,
     max_capacity: float,
     policy,
@@ -44,70 +44,61 @@ def simulate_atm_inventory_ops(
     route_penalty_per_extra_stop_cost: float = 0.0,
 ) -> SimulationResult:
     """
-    ATM inventory simulation with:
-      - Trip-based CO2 that supports route batching:
-          effective_co2_per_restock = co2_per_trip / batch_size
-      - Route complexity penalty:
-          restock_cost_effective = restock_fixed_cost + (batch_size-1)*route_penalty
-        (so batching is no longer a free lunch)
+    Single-ATM simulator.
+
+    NOTE:
+    - Here we keep your original "trip_co2 divided by batch_size" behavior since
+      you used this to approximate shared route CO2 for a single ATM.
+    - Fleet benchmark handles batching explicitly, so it should NOT use this.
     """
+
     demand = np.asarray(demand, dtype=float)
     n = int(len(demand))
 
     cash = float(initial_cash)
-    max_capacity = float(max_capacity)
 
     cash_levels = np.zeros(n, dtype=float)
     replenishments = np.zeros(n, dtype=float)
-    served = np.zeros(n, dtype=float)
-    unmet = np.zeros(n, dtype=float)
-    cashouts = np.zeros(n, dtype=int)
+    cashouts = np.zeros(n, dtype=float)
+    served_demand = np.zeros(n, dtype=float)
+    unmet_demand = np.zeros(n, dtype=float)
+    co2_kg = np.zeros(n, dtype=float)
     op_cost = np.zeros(n, dtype=float)
-    co2 = np.zeros(n, dtype=float)
 
-    co2_per_trip = float(co2_per_truck_km) * float(avg_trip_distance_km)
-
-    batch_size = max(1, int(batch_size))
-    effective_co2_per_restock = co2_per_trip / batch_size
-
-    # batching penalty: each extra stop in a batched route costs money (time/security/handling)
-    extra_stops = max(0, batch_size - 1)
-    effective_restock_cost = float(restock_fixed_cost) + float(route_penalty_per_extra_stop_cost) * float(extra_stops)
+    # per-trip CO2 approximation
+    trip_co2 = (float(co2_per_truck_km) * float(avg_trip_distance_km)) / max(1, int(batch_size))
 
     for t in range(n):
-        # 1) Decide replenish amount
-        add = float(policy.decide_replenish_amount(cash, max_capacity))
-        add = max(0.0, min(add, max_capacity - cash))
+        # refill decision
+        add = float(policy.decide_replenish_amount(cash, float(max_capacity)))
+        did_refill = add > 0.0
 
-        if add > 0.0:
-            cash += add
+        if did_refill:
+            cash = min(float(max_capacity), cash + add)
             replenishments[t] = add
-            op_cost[t] += effective_restock_cost
-            co2[t] += effective_co2_per_restock
+            co2_kg[t] = trip_co2
+            op_cost[t] += float(restock_fixed_cost) + float(route_penalty_per_extra_stop_cost) * max(0, int(batch_size) - 1)
 
-        # 2) Serve demand
+        # realize demand
         d = float(demand[t])
-        if cash >= d:
-            cash -= d
-            served[t] = d
-        else:
-            served[t] = cash
-            unmet[t] = d - cash
-            cash = 0.0
-            cashouts[t] = 1
+        served = min(cash, d)
+        unmet = max(0.0, d - cash)
+        cash -= served
 
-        # 3) Holding cost
-        op_cost[t] += cash * float(holding_cost_rate_daily)
-
-        # 4) Log cash level
         cash_levels[t] = cash
+        served_demand[t] = served
+        unmet_demand[t] = unmet
+        cashouts[t] = 1.0 if unmet > 0 else 0.0
+
+        # holding cost
+        op_cost[t] += cash * float(holding_cost_rate_daily)
 
     return SimulationResult(
         cash_levels=cash_levels,
         replenishments=replenishments,
-        served_demand=served,
-        unmet_demand=unmet,
+        served_demand=served_demand,
+        unmet_demand=unmet_demand,
         cashouts=cashouts,
         op_cost=op_cost,
-        co2_kg=co2,
+        co2_kg=co2_kg,
     )
