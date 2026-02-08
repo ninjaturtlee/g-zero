@@ -19,7 +19,6 @@ class SimulationResult:
         demand_total = float(np.sum(self.served_demand + self.unmet_demand))
         unmet_total = float(np.sum(self.unmet_demand))
         cashout_rate = float(np.mean(self.cashouts > 0))
-
         return {
             "days": int(len(self.cash_levels)),
             "cashout_rate": cashout_rate,
@@ -42,15 +41,16 @@ def simulate_atm_inventory_ops(
     co2_per_truck_km: float,
     avg_trip_distance_km: float,
     batch_size: int = 1,
+    route_penalty_per_extra_stop_cost: float = 0.0,
 ) -> SimulationResult:
     """
-    Simulate ATM cash inventory day-by-day.
-
-    Key: CO2 is trip-based, but we allow route batching:
-    effective_co2_per_restock = co2_per_trip / batch_size
-    where batch_size approximates how many ATMs are served per route.
+    ATM inventory simulation with:
+      - Trip-based CO2 that supports route batching:
+          effective_co2_per_restock = co2_per_trip / batch_size
+      - Route complexity penalty:
+          restock_cost_effective = restock_fixed_cost + (batch_size-1)*route_penalty
+        (so batching is no longer a free lunch)
     """
-
     demand = np.asarray(demand, dtype=float)
     n = int(len(demand))
 
@@ -66,18 +66,23 @@ def simulate_atm_inventory_ops(
     co2 = np.zeros(n, dtype=float)
 
     co2_per_trip = float(co2_per_truck_km) * float(avg_trip_distance_km)
+
     batch_size = max(1, int(batch_size))
     effective_co2_per_restock = co2_per_trip / batch_size
 
+    # batching penalty: each extra stop in a batched route costs money (time/security/handling)
+    extra_stops = max(0, batch_size - 1)
+    effective_restock_cost = float(restock_fixed_cost) + float(route_penalty_per_extra_stop_cost) * float(extra_stops)
+
     for t in range(n):
-        # 1) Replenish decision
+        # 1) Decide replenish amount
         add = float(policy.decide_replenish_amount(cash, max_capacity))
         add = max(0.0, min(add, max_capacity - cash))
 
         if add > 0.0:
             cash += add
             replenishments[t] = add
-            op_cost[t] += float(restock_fixed_cost)
+            op_cost[t] += effective_restock_cost
             co2[t] += effective_co2_per_restock
 
         # 2) Serve demand
@@ -94,7 +99,7 @@ def simulate_atm_inventory_ops(
         # 3) Holding cost
         op_cost[t] += cash * float(holding_cost_rate_daily)
 
-        # 4) Log
+        # 4) Log cash level
         cash_levels[t] = cash
 
     return SimulationResult(

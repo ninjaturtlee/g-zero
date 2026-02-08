@@ -1,6 +1,10 @@
 seed: 42
 horizon_days: 365
-carbon_budget_kg: 400.0
+
+# Planning / governance
+plan_horizon_days: 60
+sla_cashout_rate_max: 0.005
+carbon_budget_kg: 80.0
 
 atm:
   initial_cash: 25000
@@ -13,18 +17,4 @@ carbon:
   avg_trip_distance_km: 15.0
   batch_size: 2
 
-sla_cashout_rate_max: 0.005
-carbon_budget_kg: 150.0
-
-policy:
-  type: reorder_point
-  reorder_point: 15000
-  target_level: 45000
-
-costs:
-  restock_fixed_cost: 150.0
-  holding_cost_rate_daily: 0.0001
-
-
-sla:
-  cashout_prob_max: 0.005
+  route_penalty_per_extra_stop_cost: 40.0

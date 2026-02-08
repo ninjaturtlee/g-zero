@@ -19,7 +19,6 @@ from src.simulator.atm_inventory_sim import simulate_atm_inventory_ops
 
 
 def underforecast_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Penalize only when prediction is below actual (stockout-risk proxy)."""
     return float(np.mean(np.maximum(y_true - y_pred, 0.0)))
 
 
@@ -33,10 +32,7 @@ def get_plan_window(sim_cfg: dict, total_days: int) -> int:
 def get_simulator_params(sim_cfg: dict) -> dict:
     atm = sim_cfg.get("atm", {})
     carbon = sim_cfg.get("carbon", {})
-
-    # Support both key names to avoid KeyErrors
     avg_trip_km = carbon.get("avg_trip_distance_km", carbon.get("avg_trip_distance", 15.0))
-
     return {
         "initial_cash": float(atm.get("initial_cash", 25000)),
         "max_capacity": float(atm.get("max_capacity", 50000)),
@@ -44,7 +40,7 @@ def get_simulator_params(sim_cfg: dict) -> dict:
         "holding_cost_rate_daily": float(atm.get("holding_cost_rate_daily", atm.get("holding_cost_rate", 0.0001))),
         "co2_per_truck_km": float(carbon.get("co2_per_truck_km", 0.85)),
         "avg_trip_distance_km": float(avg_trip_km),
-        "batch_size": int(carbon.get("batch_size", 1)),
+        "route_penalty_per_extra_stop_cost": float(carbon.get("route_penalty_per_extra_stop_cost", 0.0)),
     }
 
 
@@ -54,7 +50,6 @@ def compute_totals(out) -> dict:
     co2 = np.asarray(out.co2_kg, dtype=float)
     cashouts = np.asarray(out.cashouts, dtype=float)
     unmet = np.asarray(out.unmet_demand, dtype=float)
-
     return {
         "repl_trips": int(np.sum(repl > 0)),
         "total_cost": float(np.sum(op_cost)),
@@ -77,7 +72,6 @@ def forecast_xgb(series: pd.Series, horizon: int, sim_cfg: dict, train_cfg: dict
         lags=tuple(train_cfg["lags"]),
         roll_window=int(train_cfg["roll_window"]),
     )
-
     df = feats.copy()
     df["y"] = series.values
     df = df.dropna()
@@ -94,7 +88,7 @@ def forecast_xgb(series: pd.Series, horizon: int, sim_cfg: dict, train_cfg: dict
     return np.asarray(pred_va[-horizon:], dtype=float)
 
 
-def simulate(demand: np.ndarray, policy, sim_params: dict):
+def simulate(demand: np.ndarray, policy, sim_params: dict, batch_size: int):
     return simulate_atm_inventory_ops(
         demand=demand,
         initial_cash=sim_params["initial_cash"],
@@ -104,7 +98,8 @@ def simulate(demand: np.ndarray, policy, sim_params: dict):
         holding_cost_rate_daily=sim_params["holding_cost_rate_daily"],
         co2_per_truck_km=sim_params["co2_per_truck_km"],
         avg_trip_distance_km=sim_params["avg_trip_distance_km"],
-        batch_size=sim_params["batch_size"],
+        batch_size=int(batch_size),
+        route_penalty_per_extra_stop_cost=float(sim_params["route_penalty_per_extra_stop_cost"]),
     )
 
 
@@ -112,6 +107,7 @@ def sweep(
     method: str,
     qs: list[int],
     target_fracs: list[float],
+    batch_sizes: list[int],
     series: pd.Series,
     sim_cfg: dict,
     train_cfg: dict,
@@ -126,8 +122,6 @@ def sweep(
     elif method == "xgb":
         y_pred = forecast_xgb(series, horizon=horizon, sim_cfg=sim_cfg, train_cfg=train_cfg)
         base_pred = forecast_baseline(y_all, horizon=horizon)
-
-        # Safety fallback: don't allow XGB to be worse on under-forecast risk
         if underforecast_mae(y_true, y_pred) > underforecast_mae(y_true, base_pred):
             y_pred = base_pred
             method = "xgb_fallback_to_baseline"
@@ -135,30 +129,31 @@ def sweep(
         raise ValueError("Unknown method")
 
     rows = []
-    for q in qs:
-        rp = float(np.percentile(y_pred, q))
+    for b in batch_sizes:
+        for q in qs:
+            rp = float(np.percentile(y_pred, q))
+            for tf in target_fracs:
+                if abs(tf - 1.0) < 1e-9:
+                    pol = reorder_point_policy(rp)
+                    pol_name = f"{method}_p{q}_fill1.0_b{b}"
+                else:
+                    pol = target_fill_policy(rp, tf)
+                    pol_name = f"{method}_p{q}_fill{tf:.1f}_b{b}"
 
-        for tf in target_fracs:
-            if abs(tf - 1.0) < 1e-9:
-                pol = reorder_point_policy(rp)
-                pol_name = f"{method}_p{q}_fill1.0"
-            else:
-                pol = target_fill_policy(rp, tf)
-                pol_name = f"{method}_p{q}_fill{tf:.1f}"
+                out = simulate(y_true, pol, sim_params, batch_size=b)
+                t = compute_totals(out)
 
-            out = simulate(y_true, pol, sim_params)
-            t = compute_totals(out)
-
-            rows.append(
-                {
-                    "policy": pol_name,
-                    "method": method,
-                    "q": q,
-                    "target_frac": tf,
-                    "reorder_point": rp,
-                    **t,
-                }
-            )
+                rows.append(
+                    {
+                        "policy": pol_name,
+                        "method": method,
+                        "q": q,
+                        "target_frac": tf,
+                        "batch_size": b,
+                        "reorder_point": rp,
+                        **t,
+                    }
+                )
 
     return pd.DataFrame(rows)
 
@@ -170,18 +165,20 @@ def main() -> None:
     days = int(sim_cfg.get("horizon_days", 365))
     seed = int(sim_cfg.get("seed", 42))
     series = generate_bank_real_series(BankRealGeneratorConfig(days=days, seed=seed))
+
     sim_params = get_simulator_params(sim_cfg)
 
     SLA_MAX = float(sim_cfg.get("sla_cashout_rate_max", 0.005))
-    CO2_BUDGET = float(sim_cfg.get("carbon_budget_kg", 150.0))
+    CO2_BUDGET = float(sim_cfg.get("carbon_budget_kg", 80.0))
 
     qs = list(range(50, 96, 5))  # 50..95
     target_fracs = [0.6, 0.7, 0.8, 0.9, 1.0]
+    batch_sizes = [1, 2, 3]
 
     df = pd.concat(
         [
-            sweep("baseline", qs, target_fracs, series, sim_cfg, train_cfg, sim_params),
-            sweep("xgb", qs, target_fracs, series, sim_cfg, train_cfg, sim_params),
+            sweep("baseline", qs, target_fracs, batch_sizes, series, sim_cfg, train_cfg, sim_params),
+            sweep("xgb", qs, target_fracs, batch_sizes, series, sim_cfg, train_cfg, sim_params),
         ],
         ignore_index=True,
     )
@@ -191,23 +188,36 @@ def main() -> None:
 
     print("\n=== Governed Selection (min cost under SLA + carbon budget) ===")
     print(f"SLA cashout_rate <= {SLA_MAX} | Carbon budget <= {CO2_BUDGET} kg")
-    print(f"Search grid: quantiles={qs[0]}..{qs[-1]} step 5 | target_fill={target_fracs} | batch_size={sim_params['batch_size']}")
+    print(
+        f"Search grid: quantiles={qs[0]}..{qs[-1]} step 5 | target_fill={target_fracs} | "
+        f"batch_sizes={batch_sizes} | route_penalty={(sim_params['route_penalty_per_extra_stop_cost']):.2f}/extra_stop"
+    )
 
     if feasible.empty:
         print("\nNo feasible policies under current constraints.")
-        print("Next moves: increase batch_size (route batching) OR increase max_capacity OR relax carbon_budget_kg.")
+        print("Tip: increase carbon_budget_kg slightly or reduce route_penalty.")
     else:
         best = feasible.iloc[0]
         print("\nChosen policy:")
         print(
             f"- {best['policy']} | rp={best['reorder_point']:.2f} | "
-            f"fill={best['target_frac']:.1f} | cashout={best['cashout_rate']:.4f} | "
-            f"trips={int(best['repl_trips'])} | cost={best['total_cost']:.2f} | co2={best['total_co2_kg']:.2f}"
+            f"fill={best['target_frac']:.1f} | batch={int(best['batch_size'])} | "
+            f"cashout={best['cashout_rate']:.4f} | trips={int(best['repl_trips'])} | "
+            f"cost={best['total_cost']:.2f} | co2={best['total_co2_kg']:.2f}"
         )
 
-        print("\nTop 5 feasible (cheapest):")
-        cols = ["policy", "reorder_point", "target_frac", "cashout_rate", "repl_trips", "total_cost", "total_co2_kg"]
-        print(feasible[cols].head(5).to_string(index=False))
+        print("\nTop 10 feasible (cheapest):")
+        cols = [
+            "policy",
+            "reorder_point",
+            "target_frac",
+            "batch_size",
+            "cashout_rate",
+            "repl_trips",
+            "total_cost",
+            "total_co2_kg",
+        ]
+        print(feasible[cols].head(10).to_string(index=False))
 
     out_dir = Path("artifacts/benchmarks")
     out_dir.mkdir(parents=True, exist_ok=True)
